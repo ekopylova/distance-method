@@ -38,7 +38,7 @@ from skbio.parse.sequences import parse_fasta
 
 
 def preprocess_data(working_dir,
-                    reference_proteomes_dir,
+                    target_proteomes_dir,
                     verbose=False):
     """ Map each gene to sudo name (ex. S1_G1) for easier
         output comparison and the 10 character name limitation
@@ -51,9 +51,9 @@ def preprocess_data(working_dir,
         sys.stdout.write("Target organism\tNumber of genes\n")
     # each file contains genes for species
     species = 0
-    for _file in glob.glob(join(reference_proteomes_dir, "*.faa")):
+    for _file in glob.glob(join(target_proteomes_dir, "*.faa")):
         if verbose:
-            sys.stdout.write("%s\t" % basename(_file))
+            sys.stdout.write("%s. %s\t" % (species+1, basename(_file)))
         with open(_file, 'rb') as readfile:
             gene = 0
             for label, seq in parse_fasta(readfile):
@@ -62,7 +62,7 @@ def preprocess_data(working_dir,
                 # (update this for other parsing requirements)
                 label = label.split('|')[1]
                 ref_db[label] = seq
-                sudo_label = "S%s_G%s" % (species, gene)
+                sudo_label = "%s_%s" % (species, gene)
                 gene_map[label] = sudo_label
                 gene_map[sudo_label] = label
                 gene+=1
@@ -72,7 +72,7 @@ def preprocess_data(working_dir,
     return gene_map, ref_db, species
             
 
-def launch_blast(target_proteome_fp,
+def launch_blast(query_proteome_fp,
                  ref_fp,
                  working_dir,
                  e_value=10e-20,
@@ -94,10 +94,10 @@ def launch_blast(target_proteome_fp,
         print stderr
 
     # launch blast
-    out_file_fp = join(working_dir, "%s.blast" % basename(splitext(target_proteome_fp)[0]))
+    out_file_fp = join(working_dir, "%s.blast" % basename(splitext(query_proteome_fp)[0]))
     blastp_command = ["blastp",
                       "-db", ref_fp,
-                      "-query", target_proteome_fp,
+                      "-query", query_proteome_fp,
                       "-evalue", str(e_value),
                       "-num_threads", str(threads),
                       "-outfmt", "6 std qcovs",
@@ -160,6 +160,7 @@ def launch_msa(fasta_in_fp,
     """ Create multiple sequence alignments for all gene othologs
     """
     with open(fasta_in_fp, 'w') as in_f:
+        sorted(hits[query])
         for ref in hits[query]:
             in_f.write(">%s\n%s\n" % (gene_map[ref], ref_db[ref]))
     # run CLUSTALW
@@ -194,46 +195,107 @@ def compute_distances(phylip_command_fp,
 
 
 def normalize_distances(phylip_fp,
-                        full_distance_matrix):
+                        full_distance_matrix,
+                        num_species,
+                        full_distance_matrix_offset):
     """ Parse PHYLIP alignments and Z-score normalize each
-        alignment entry
+        alignment entry.
     """
+    # assume a pairwise alignment exists for all species
+    missing_species = [str(x) for x in range(0,num_species)]
+    # scan through file and remove species that exist
+    # from missing_species
+    with open(phylip_fp, 'U') as phylip_f:
+      for line in phylip_f:
+        alignment_dist = line.strip().split()
+        if len(alignment_dist) == 1:
+          continue
+        if not line.startswith(' '):
+          species = line.split()[0].split('_')[0]
+          missing_species.remove(species)
+
+    # scan through file again, collecting alignment
+    # distances
+    orig_order_labels = []
+    p = numpy.empty(shape=(num_species,num_species))
+    p.fill(numpy.nan)
+    idx_p = 0
+    ind_a = 0
     with open(phylip_fp, 'U') as phylip_f:
         alignment_list = []
-        alignment_dict = {}
-        alignment_count = 0
         for line in phylip_f:
-            sys.stdout.write(line)
             alignment_dist = line.strip().split()
             if len(alignment_dist) == 1:
                 continue
             if line.startswith(' '):
                 alignment_list.extend(alignment_dist)
             else:
-                # list is empty (first alignment in file)
+                # new species alignment pairs
                 if alignment_list:
-                    # remove the 0.0 distance for the alignment of a gene vs. itself
-                    del alignment_list[alignment_count]
+                    for i in range(0, len(missing_species)):
+                      alignment_list.append(None)                  
                     a = numpy.asarray(alignment_list[1:], dtype=float)
-                    mean = numpy.average(a)
-                    stdev = numpy.std(a)
+                    a[ind_a] = numpy.nan
+                    ind_a += 1
+                    mean = numpy.nanmean(a)
+                    stdev = numpy.nanstd(a)
                     for x in numpy.nditer(a, op_flags=['readwrite']):
-                        x[...] = (x-mean)/stdev
-                    alignment_dict[alignment_list[0]] = a
+                      x[...] = (x-mean)/stdev
+                    p[idx_p] = a
+                    idx_p += 1
+                    orig_order_labels.append(alignment_list[0])
                 alignment_list = alignment_dist
-                alignment_count+=1
 
-        # sort by species name (ex. S1, S2, S3 .. Sn)
-        print "alignment_dict = ", alignment_dict
+    # add distance on final line
+    for i in range(0, len(missing_species)):
+      alignment_list.append(None)
+    a = numpy.asarray(alignment_list[1:], dtype=float)
+    a[ind_a] = numpy.nan
+    mean = numpy.nanmean(a)
+    stdev = numpy.nanstd(a)
+    for x in numpy.nditer(a, op_flags=['readwrite']):
+      x[...] = (x-mean)/stdev
+    p[idx_p] = a
+    orig_order_labels.append(alignment_list[0])
 
+    # add the missing species names to the labels array
+    for species in missing_species:
+      orig_order_labels.append("%s_X" % species)
+
+    # sort the distance matrix based on species names (S1, S2, S3 ..)
+    # in order to be consistent across all gene families
+    sorted_order_labels = sorted(orig_order_labels)
+    map_orig_sorted = {}
+    for idx_orig, label in enumerate(orig_order_labels):
+      idx_sorted = sorted_order_labels.index(label)
+      map_orig_sorted[idx_orig] = idx_sorted
+
+    # re-order rows by ordered species name (0,1,2 ..)
+    p2 = numpy.zeros(shape=(num_species,num_species))
+    for idx, arr in enumerate(p):
+      p2[map_orig_sorted[idx]] = arr
+    del p
+ 
+    # re-order columns by ordered species name (0,1,2 ..)
+    p3 = numpy.zeros(shape=(num_species,num_species))
+    for idx_a, arr in enumerate(p2):
+      t = numpy.zeros(shape=num_species)
+      for idx_b, el in enumerate(arr):
+        t[map_orig_sorted[idx_b]] = el
+      p3[idx_a] = t
+    del p2
+
+    # add normalized distance matrix for current gene
+    # to full distance matrix
+    full_distance_matrix[full_distance_matrix_offset] = p3
                 
 
 
 @click.command()
-@click.argument('target-proteome-fp', required=True,
+@click.argument('query-proteome-fp', required=True,
                 type=click.Path(resolve_path=True, readable=True, exists=True,
                                 file_okay=True))
-@click.argument('reference-proteomes-dir', required=True,
+@click.argument('target-proteomes-dir', required=True,
                 type=click.Path(resolve_path=True, readable=True, exists=True,
                                 file_okay=True))
 @click.argument('working-dir', required=True,
@@ -265,8 +327,8 @@ def normalize_distances(phylip_fp,
               help=("Run in verbose mode"))
 @click.option('--warnings', type=bool, required=False, default=False, show_default=True,
               help=("Print program warnings"))
-def _main(target_proteome_fp,
-          reference_proteomes_dir,
+def _main(query_proteome_fp,
+          target_proteomes_dir,
           working_dir,
           min_num_homologs,
           e_value,
@@ -281,18 +343,18 @@ def _main(target_proteome_fp,
     """
     if verbose:
         sys.stdout.write("Begin whole-genome HGT detection using the Distance method.\n\n")
-        sys.stdout.write("Query genome: %s\n" % target_proteome_fp)
+        sys.stdout.write("Query genome: %s\n" % query_proteome_fp)
 
     gene_map, ref_db, num_species = preprocess_data(working_dir=working_dir,
-        reference_proteomes_dir=reference_proteomes_dir,
+        target_proteomes_dir=target_proteomes_dir,
         verbose=verbose)
 
     if verbose:
         sys.stdout.write("\nRunning BLASTp ..\n")
     hits = {}
-    for _file in glob.glob(join(reference_proteomes_dir, "*.faa")):
+    for _file in glob.glob(join(target_proteomes_dir, "*.faa")):
         # launch BLASTp
-        alignments_fp = launch_blast(target_proteome_fp=target_proteome_fp,
+        alignments_fp = launch_blast(query_proteome_fp=query_proteome_fp,
             ref_fp=_file,
             working_dir=working_dir,
             e_value=e_value,
@@ -338,7 +400,7 @@ def _main(target_proteome_fp,
     if max_homologs > num_species:
         raise ValueError("max_homologs > num_species: %s > %s " % (max_homologs, num_species))
     # distance matrix containing distances between all ortholog genes
-    full_distance_matrix = numpy.zeros(total_genes*num_species*(num_species-1))
+    full_distance_matrix = numpy.zeros(shape=(total_genes,num_species,num_species), dtype=float)
     for query in hits_min_num_homologs:
         if verbose:
             print "Computing MSA and distances for gene %s .. (%s/%s)" % (query, i, total_genes)
@@ -359,8 +421,13 @@ def _main(target_proteome_fp,
             verbose=verbose,
             warnings=warnings)
 
+        # Z-score normalize distance matrix and add results
+        # to full distance matrix (for all genes)
         normalize_distances(phylip_fp=phylip_fp,
-            full_distance_matrix=full_distance_matrix)
+            full_distance_matrix=full_distance_matrix,
+            num_species=num_species,
+            full_distance_matrix_offset=i)
+
         i += 1
 
 
