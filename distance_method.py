@@ -32,9 +32,18 @@ import glob
 from os.path import join, splitext, basename
 from subprocess import Popen, PIPE
 from string import maketrans
+from itertools import imap, chain
 import numpy
+import operator
 
 from skbio.parse.sequences import parse_fasta
+
+
+def hamming(str1, str2):
+    "Compute the Hamming distance between two strings"
+    assert len(str1) == len(str2)
+    ne = operator.ne
+    return sum(imap(ne, str1, str2))
 
 
 def preprocess_data(working_dir,
@@ -197,9 +206,12 @@ def compute_distances(phylip_command_fp,
 def normalize_distances(phylip_fp,
                         full_distance_matrix,
                         num_species,
-                        full_distance_matrix_offset):
-    """ Parse PHYLIP alignments and Z-score normalize each
-        alignment entry.
+                        full_distance_matrix_offset,
+                        species_set_dict,
+                        gene_bitvector_map):
+    """ - Parse PHYLIP alignments and Z-score normalize each
+        alignment entry
+        - Compute bitvectors for all species sets
     """
     # assume a pairwise alignment exists for all species
     missing_species = [str(x) for x in range(0,num_species)]
@@ -223,17 +235,18 @@ def normalize_distances(phylip_fp,
     ind_a = 0
     with open(phylip_fp, 'U') as phylip_f:
         alignment_list = []
+        # skip first line containing number of lines in
+        # the file
+        next(phylip_f)
         for line in phylip_f:
             alignment_dist = line.strip().split()
-            if len(alignment_dist) == 1:
-                continue
             if line.startswith(' '):
                 alignment_list.extend(alignment_dist)
             else:
                 # new species alignment pairs
                 if alignment_list:
                     for i in range(0, len(missing_species)):
-                      alignment_list.append(None)                  
+                      alignment_list.append(None)                
                     a = numpy.asarray(alignment_list[1:], dtype=float)
                     a[ind_a] = numpy.nan
                     ind_a += 1
@@ -259,8 +272,21 @@ def normalize_distances(phylip_fp,
     orig_order_labels.append(alignment_list[0])
 
     # add the missing species names to the labels array
+    bitvector_gene = 'I' * num_species
     for species in missing_species:
       orig_order_labels.append("%s_X" % species)
+      # indicate missing gene for current species
+      l = list(bitvector_gene)
+      l[int(species)] = 'O'
+      bitvector_gene = ''.join(l)
+
+    # update species set counts
+    if bitvector_gene not in species_set_dict:
+      species_set_dict[bitvector_gene] = 1
+    else:
+      species_set_dict[bitvector_gene] += 1
+
+    gene_bitvector_map[full_distance_matrix_offset] = bitvector_gene
 
     # sort the distance matrix based on species names (S1, S2, S3 ..)
     # in order to be consistent across all gene families
@@ -270,25 +296,75 @@ def normalize_distances(phylip_fp,
       idx_sorted = sorted_order_labels.index(label)
       map_orig_sorted[idx_orig] = idx_sorted
 
-    # re-order rows by ordered species name (0,1,2 ..)
+    # re-order rows and columns by ordered species name (0,1,2 ..)
     p2 = numpy.zeros(shape=(num_species,num_species))
-    for idx, arr in enumerate(p):
-      p2[map_orig_sorted[idx]] = arr
-    del p
- 
-    # re-order columns by ordered species name (0,1,2 ..)
-    p3 = numpy.zeros(shape=(num_species,num_species))
-    for idx_a, arr in enumerate(p2):
+    for idx_a, arr in enumerate(p):
       t = numpy.zeros(shape=num_species)
       for idx_b, el in enumerate(arr):
         t[map_orig_sorted[idx_b]] = el
-      p3[idx_a] = t
-    del p2
-
+      p2[map_orig_sorted[idx_a]] = t
+    del p
+ 
     # add normalized distance matrix for current gene
     # to full distance matrix
-    full_distance_matrix[full_distance_matrix_offset] = p3
+    full_distance_matrix[full_distance_matrix_offset] = p2
                 
+
+def cluster_distances(species_set_dict,
+                      species_set_size,
+                      hamming_distance):
+    """ Cluster gene families by species with detectable
+        orthologs in exactly the same subset of the
+        considered species
+    """
+    sorted_species_set = sorted(species_set_dict.items(),
+      key=operator.itemgetter(1), reverse=True)
+
+    # determine core clusters (initial species sets
+    # with more than species_set_size genes)
+    gene_clusters_dict = {}
+    for bitvector in sorted_species_set:
+      if bitvector[1] >= species_set_size:
+        gene_clusters_dict[bitvector[0]] = []
+
+    # assign species sets with fewer than species_set_size
+    # species to core clusters if the Hamming distance
+    # between the two bitvectors is less than
+    # hamming_distance
+    species_set_assigned = []
+    for cluster_core in gene_clusters_dict:
+      for bitvector in sorted_species_set:
+        if hamming(cluster_core, bitvector[0]) <= hamming_distance:
+          gene_clusters_dict[cluster_core].append(bitvector[0])
+          species_set_assigned.append(bitvector[0])
+
+    # assign the remaining species sets to the
+    # cluster with the closest core Hamming distance
+    for bitvector in sorted_species_set:
+      if bitvector[0] not in species_set_assigned:
+        min_hamming_cluster = ""
+        min_hamming_distance = sys.maxint
+        # find cluster core with smallest Hamming distance
+        # to species set
+        for cluster_core in gene_clusters_dict:
+          dist = hamming(cluster_core, bitvector[0])
+          if dist < min_hamming_distance:
+            min_hamming_distance = dist
+            min_hamming_cluster = cluster_core
+        gene_clusters_dict[min_hamming_cluster].append(bitvector[0])
+
+    return gene_clusters_dict
+
+
+def detect_outlier_genes(species_set,
+        gene_bitvector_map,
+        full_distance_matrix,
+        stdev_offset,
+        outlier_hgt):
+    """ Detect outlier genes
+    """
+    return None
+
 
 
 @click.command()
@@ -308,9 +384,9 @@ def normalize_distances(phylip_fp,
               help=("The E-value cutoff to identify orthologous genes using BLASTP"))
 @click.option('--threads', type=int, required=False, default=1, show_default=True,
               help=("Number of threads to use"))
-@click.option('--z-score', type=float, required=False, default=1.5, show_default=True,
-              help=("The number of standard deviations a gene's distance is from the mean "
-                    "to identify it as an outlier for a species pair"))
+@click.option('--stdev-offset', type=float, required=False, default=1.5, show_default=True,
+              help=("The number of standard deviations a gene's normalized distance "
+                    "is from the mean to identify it as an outlier for a species pair"))
 @click.option('--outlier-hgt', type=float, default=0.5, show_default=True,
               required=False,
               help=('The fraction (value between (0,1]) of normalized pairwise '
@@ -333,7 +409,7 @@ def _main(query_proteome_fp,
           min_num_homologs,
           e_value,
           threads,
-          z_score,
+          stdev_offset,
           outlier_hgt,
           species_set_size,
           hamming_distance,
@@ -401,39 +477,54 @@ def _main(query_proteome_fp,
         raise ValueError("max_homologs > num_species: %s > %s " % (max_homologs, num_species))
     # distance matrix containing distances between all ortholog genes
     full_distance_matrix = numpy.zeros(shape=(total_genes,num_species,num_species), dtype=float)
+    # dictionary to store all subsets of orthologs (keys) and
+    # their number of occurrences (values) (maximum occurrences
+    # is equal to the number of genes)
+    species_set_dict = {}
+    gene_bitvector_map = {}
     for query in hits_min_num_homologs:
-        if verbose:
-            print "Computing MSA and distances for gene %s .. (%s/%s)" % (query, i, total_genes)
-        # generate a multiple sequence alignment
-        # for each orthologous gene family
-        launch_msa(fasta_in_fp=fasta_in_fp,
-            clustal_command_fp=clustal_command_fp,
-            ref_db=ref_db,
-            gene_map=gene_map,
-            hits=hits_min_num_homologs,
-            query=query,
-            verbose=verbose,
-            warnings=warnings)
- 
-        # compute distances between each pair of sequences in MSA
-        compute_distances(phylip_command_fp=phylip_command_fp,
-            phylip_fp=phylip_fp,
-            verbose=verbose,
-            warnings=warnings)
+      if verbose:
+          print "Computing MSA and distances for gene %s .. (%s/%s)" % (query, i+1, total_genes)
+      # generate a multiple sequence alignment
+      # for each orthologous gene family
+      launch_msa(fasta_in_fp=fasta_in_fp,
+          clustal_command_fp=clustal_command_fp,
+          ref_db=ref_db,
+          gene_map=gene_map,
+          hits=hits_min_num_homologs,
+          query=query,
+          verbose=verbose,
+          warnings=warnings)
 
-        # Z-score normalize distance matrix and add results
-        # to full distance matrix (for all genes)
-        normalize_distances(phylip_fp=phylip_fp,
-            full_distance_matrix=full_distance_matrix,
-            num_species=num_species,
-            full_distance_matrix_offset=i)
+      # compute distances between each pair of sequences in MSA
+      compute_distances(phylip_command_fp=phylip_command_fp,
+          phylip_fp=phylip_fp,
+          verbose=verbose,
+          warnings=warnings)
 
-        i += 1
+      # Z-score normalize distance matrix and add results
+      # to full distance matrix (for all genes)
+      normalize_distances(phylip_fp=phylip_fp,
+          full_distance_matrix=full_distance_matrix,
+          num_species=num_species,
+          full_distance_matrix_offset=i,
+          species_set_dict=species_set_dict,
+          gene_bitvector_map=gene_bitvector_map)
 
+      i += 1
 
+    # cluster gene families by species
+    gene_clusters_dict = cluster_distances(species_set_dict=species_set_dict,
+      species_set_size=species_set_size,
+      hamming_distance=hamming_distance)
 
-
-            
+    # detect outlier genes per core cluster of genes
+    for core_cluster in gene_clusters_dict:
+      outlier_genes = detect_outlier_genes(species_set=gene_clusters_dict[core_cluster],
+        gene_bitvector_map=gene_bitvector_map,
+        full_distance_matrix=full_distance_matrix,
+        stdev_offset=stdev_offset,
+        outlier_hgt=outlier_hgt)            
 
 
 
