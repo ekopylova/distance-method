@@ -410,38 +410,53 @@ def detect_outlier_genes(species_set,
         full_distance_matrix,
         stdev_offset,
         outlier_hgt,
-        num_species):
+        num_species,
+        total_genes):
     """ Detect outlier genes
     """
-    distance_vector = numpy.zeros(len(full_distance_matrix))
-    outlier_gene_counts = numpy.zeros(len(full_distance_matrix))
+    outlier_flag_matrix = numpy.zeros(shape=(total_genes,num_species,num_species), dtype=bool)
+    distance_vector = numpy.zeros(total_genes)
     for i in range(num_species):
       for j in range(num_species):
         if i != j:
-          for k in range(len(full_distance_matrix)):
+          for k in range(total_genes):
             distance_vector[k] = full_distance_matrix[k][i][j]
           mean = numpy.nanmean(distance_vector)
           stdev = numpy.nanstd(distance_vector)
           low_bound = mean - stdev_offset*stdev
           up_bound = mean + stdev_offset*stdev
-          for distance in distance_vector:
-            if ((distance < low_bound) or (distance > up_bound)):
-              outlier_gene_counts[k] += 1
+          for k, distance in enumerate(distance_vector):
+            if (distance != numpy.nan and ((distance < low_bound) or (distance > up_bound))):
+              outlier_flag_matrix[k][i][j] = 1
 
-    for i in range(len(outlier_gene_counts)):
-      print "%s\t%s" % (i, outlier_gene_counts[i])
+    # traverse outlier_matrix by gene and count the number of
+    # outlier distances by species
+    outlier_count_matrix = numpy.zeros(shape=(total_genes,num_species), dtype=int)
+    for i in range(total_genes):
+      for j in range(num_species):
+        for k in range(num_species):
+          if outlier_flag_matrix[i][j][k]:
+            outlier_count_matrix[i][k] += 1
 
-    return outlier_gene_counts
+    # if number of outlier distances exceeds threshold, label
+    # gene as outlier
+    outlier_genes = []
+    for i in range(total_genes):
+      for j in range(num_species):
+        if outlier_count_matrix[i][j] > num_species*outlier_hgt:
+          outlier_genes.append(i)
+
+    return outlier_genes
 
 
-def output_full_matrix(full_distance_matrix, num_species):
+def output_full_matrix(matrix, num_species):
   """ Output distance matrix to stdout
   """
   for i in range(num_species):
     for j in range(num_species):
       # for gene number
-      for k in range(len(full_distance_matrix)):
-        sys.stdout.write("%s\t" % full_distance_matrix[k][i][j])
+      for k in range(len(matrix)):
+        sys.stdout.write("%s\t" % matrix[k][i][j])
       sys.stdout.write("\n")
 
 
@@ -463,7 +478,7 @@ def output_full_matrix(full_distance_matrix, num_species):
               help=("The E-value cutoff to identify orthologous genes using BLASTP"))
 @click.option('--threads', type=int, required=False, default=1, show_default=True,
               help=("Number of threads to use"))
-@click.option('--stdev-offset', type=float, required=False, default=1.5, show_default=True,
+@click.option('--stdev-offset', type=float, required=False, default=2.326, show_default=True,
               help=("The number of standard deviations a gene's normalized distance "
                     "is from the mean to identify it as an outlier for a species pair"))
 @click.option('--outlier-hgt', type=float, default=0.5, show_default=True,
@@ -553,7 +568,6 @@ def _main(query_proteome_fp,
         phylip_command_f.write('%s\nF\n%s\nR\nY\n' % (phy_msa_fp, phylip_fp))
 
     total_genes = len(hits_min_num_homologs)
-    i = 0
     if verbose:
         sys.stdout.write("\nRunning CLUSTALW and PROTDIST ..\n")
     if max_homologs > num_species:
@@ -565,9 +579,11 @@ def _main(query_proteome_fp,
     # is equal to the number of genes)
     species_set_dict = {}
     gene_bitvector_map = {}
-    for query in hits_min_num_homologs:
+    gene_id = {}
+    for i, query in enumerate(hits_min_num_homologs):
       if verbose:
           print "Computing MSA and distances for gene %s .. (%s/%s)" % (query, i+1, total_genes)
+      gene_id[i] = query
       # generate a multiple sequence alignment
       # for each orthologous gene family
       launch_msa(fasta_in_fp=fasta_in_fp,
@@ -595,8 +611,6 @@ def _main(query_proteome_fp,
           species_set_dict=species_set_dict,
           gene_bitvector_map=gene_bitvector_map)
 
-      i += 1
-
     #output_full_matrix(full_distance_matrix, num_species)
 
     # cluster gene families by species
@@ -605,13 +619,22 @@ def _main(query_proteome_fp,
       hamming_distance=hamming_distance)
 
     # detect outlier genes per core cluster of genes
+    sys.stdout.write("Candidate HGT genes: \n")
     for core_cluster in gene_clusters_dict:
       outlier_genes = detect_outlier_genes(species_set=gene_clusters_dict[core_cluster],
         gene_bitvector_map=gene_bitvector_map,
         full_distance_matrix=full_distance_matrix,
         stdev_offset=stdev_offset,
         outlier_hgt=outlier_hgt,
-        num_species=num_species)            
+        num_species=num_species,
+        total_genes=total_genes)
+
+      for gene in outlier_genes:
+        sys.stdout.write("%s\n" % gene_id[gene])          
+
+    #output_full_matrix(outlier_genes, num_species)
+
+
 
 
 
