@@ -29,14 +29,62 @@
 import sys
 import click
 import glob
-from os.path import join, splitext, basename
-from subprocess import Popen, PIPE
-from string import maketrans
-from itertools import imap, chain
 import numpy
 import operator
+import threading
+import subprocess
+import traceback
+import shlex
+from os.path import join, splitext, basename
+from string import maketrans
+from itertools import imap, chain
+
 
 from skbio.parse.sequences import parse_fasta
+
+
+class Command(object):
+    """
+    Enables to run subprocess commands in a different thread
+    with TIMEOUT option.
+
+    Based on jcollado's solution:
+    http://stackoverflow.com/questions/1191374/subprocess-with-timeout/4825933#4825933
+    https://gist.github.com/kirpit/1306188
+    """
+    command = None
+    process = None
+    status = None
+    output, error = '', ''
+ 
+    def __init__(self, command):
+        if isinstance(command, basestring):
+            command = shlex.split(command)
+        self.command = command
+ 
+    def run(self, timeout=None, **kwargs):
+        """ Run a command then return: (status, output, error). """
+        def target(**kwargs):
+            try:
+                self.process = subprocess.Popen(self.command, **kwargs)
+                self.output, self.error = self.process.communicate()
+                self.status = self.process.returncode
+            except:
+                self.error = traceback.format_exc()
+                self.status = -1
+        # default stdout and stderr
+        if 'stdout' not in kwargs:
+            kwargs['stdout'] = subprocess.PIPE
+        if 'stderr' not in kwargs:
+            kwargs['stderr'] = subprocess.PIPE
+        # thread
+        thread = threading.Thread(target=target, kwargs=kwargs)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            self.process.terminate()
+            thread.join()
+        return self.status, self.output, self.error
 
 
 def hamming(str1, str2):
@@ -93,9 +141,9 @@ def launch_blast(query_proteome_fp,
                            "-in", ref_fp,
                            "-dbtype", "prot",
                            "-parse_seqids"]
-    proc = Popen(makeblastdb_command,
-                 stdout=PIPE,
-                 stderr=PIPE,
+    proc = subprocess.Popen(makeblastdb_command,
+                 stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE,
                  close_fds=True)
     proc.wait()
     stdout, stderr = proc.communicate()
@@ -112,9 +160,9 @@ def launch_blast(query_proteome_fp,
                       "-outfmt", "6 std qcovs",
                       "-task", "blastp",
                       "-out", out_file_fp]
-    proc = Popen(blastp_command,
-                 stdout=PIPE,
-                 stderr=PIPE,
+    proc = subprocess.Popen(blastp_command,
+                 stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE,
                  close_fds=True)
     proc.wait()
     stdout, stderr = proc.communicate()
@@ -126,7 +174,8 @@ def launch_blast(query_proteome_fp,
 
 def parse_blast(alignments_fp,
                 hits,
-                gene_map):
+                gene_map,
+                evalue_cutoff):
     """ Parse BLASTp alignment file into a dictionary where
         the keys are the queries and the values are all the
         reference sequences to which the query mapped with
@@ -138,6 +187,7 @@ def parse_blast(alignments_fp,
             line = line.split('\t')
             query = line[0]
             ref = line[1]
+            e_value = line[10]
             # do not store alignments where the query
             # gene matched itself in the database
             if query == ref:
@@ -155,6 +205,7 @@ def parse_blast(alignments_fp,
                         add_alignment = False
                         break
                 if add_alignment:
+                  if float(e_value) <= float(evalue_cutoff):
                     hits[query].append(ref)
 
 
@@ -164,6 +215,7 @@ def launch_msa(fasta_in_fp,
                ref_db,
                hits,
                query,
+               timeout,
                verbose=False,
                warnings=False):
     """ Create multiple sequence alignments for all gene othologs
@@ -171,18 +223,15 @@ def launch_msa(fasta_in_fp,
     with open(fasta_in_fp, 'w') as in_f:
         sorted(hits[query])
         for ref in hits[query]:
-            in_f.write(">%s\n%s\n" % (gene_map[ref], ref_db[ref]))
-    # run CLUSTALW
+          in_f.write(">%s\n%s\n" % (gene_map[ref], ref_db[ref]))
+
     with open(clustal_command_fp, 'U') as clustal_command_f:
-        proc = Popen("clustalw",
-                     stdin=clustal_command_f,
-                     stdout=PIPE,
-                     stderr=PIPE,
-                     close_fds=True)
-        proc.wait()
-        stdout, stderr = proc.communicate()
-        if stderr and warnings:
-            print stderr
+      clustalw_command = Command("clustalw")
+      status, output, error = clustalw_command.run(timeout=timeout,
+        stdin=clustal_command_f,
+        close_fds=True)
+      if status < 0:
+        sys.stdout.write("status: %s\noutput: %s\terror: %s\t" % (status, output, error))
 
 
 def compute_distances(phylip_command_fp,
@@ -192,10 +241,10 @@ def compute_distances(phylip_command_fp,
     """ Compute distances between each pair of sequences in MSA
     """
     with open(phylip_command_fp, 'U') as phylip_command_f:
-        proc = Popen("protdist",
+        proc = subprocess.Popen("protdist",
                      stdin=phylip_command_f,
-                     stdout=PIPE,
-                     stderr=PIPE,
+                     stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE,
                      close_fds=True)
         proc.wait()
         stdout, stderr = proc.communicate()
@@ -360,10 +409,40 @@ def detect_outlier_genes(species_set,
         gene_bitvector_map,
         full_distance_matrix,
         stdev_offset,
-        outlier_hgt):
+        outlier_hgt,
+        num_species):
     """ Detect outlier genes
     """
-    return None
+    distance_vector = numpy.zeros(len(full_distance_matrix))
+    outlier_gene_counts = numpy.zeros(len(full_distance_matrix))
+    for i in range(num_species):
+      for j in range(num_species):
+        if i != j:
+          for k in range(len(full_distance_matrix)):
+            distance_vector[k] = full_distance_matrix[k][i][j]
+          mean = numpy.nanmean(distance_vector)
+          stdev = numpy.nanstd(distance_vector)
+          low_bound = mean - stdev_offset*stdev
+          up_bound = mean + stdev_offset*stdev
+          for distance in distance_vector:
+            if ((distance < low_bound) or (distance > up_bound)):
+              outlier_gene_counts[k] += 1
+
+    for i in range(len(outlier_gene_counts)):
+      print "%s\t%s" % (i, outlier_gene_counts[i])
+
+    return outlier_gene_counts
+
+
+def output_full_matrix(full_distance_matrix, num_species):
+  """ Output distance matrix to stdout
+  """
+  for i in range(num_species):
+    for j in range(num_species):
+      # for gene number
+      for k in range(len(full_distance_matrix)):
+        sys.stdout.write("%s\t" % full_distance_matrix[k][i][j])
+      sys.stdout.write("\n")
 
 
 
@@ -403,6 +482,8 @@ def detect_outlier_genes(species_set,
               help=("Run in verbose mode"))
 @click.option('--warnings', type=bool, required=False, default=False, show_default=True,
               help=("Print program warnings"))
+@click.option('--timeout', type=int, required=False, default=120, show_default=True,
+              help=("Number of seconds to allow Clustalw to run per call"))
 def _main(query_proteome_fp,
           target_proteomes_dir,
           working_dir,
@@ -414,7 +495,8 @@ def _main(query_proteome_fp,
           species_set_size,
           hamming_distance,
           verbose,
-          warnings):
+          warnings,
+          timeout):
     """
     """
     if verbose:
@@ -439,7 +521,8 @@ def _main(query_proteome_fp,
         # generate a dictionary of orthologous genes
         parse_blast(alignments_fp=alignments_fp,
                     hits=hits,
-                    gene_map=gene_map)
+                    gene_map=gene_map,
+                    evalue_cutoff=e_value)
 
     # keep only genes with >= min_num_homologs
     hits_min_num_homologs = {}
@@ -493,6 +576,7 @@ def _main(query_proteome_fp,
           gene_map=gene_map,
           hits=hits_min_num_homologs,
           query=query,
+          timeout=timeout,
           verbose=verbose,
           warnings=warnings)
 
@@ -513,6 +597,8 @@ def _main(query_proteome_fp,
 
       i += 1
 
+    #output_full_matrix(full_distance_matrix, num_species)
+
     # cluster gene families by species
     gene_clusters_dict = cluster_distances(species_set_dict=species_set_dict,
       species_set_size=species_set_size,
@@ -524,7 +610,8 @@ def _main(query_proteome_fp,
         gene_bitvector_map=gene_bitvector_map,
         full_distance_matrix=full_distance_matrix,
         stdev_offset=stdev_offset,
-        outlier_hgt=outlier_hgt)            
+        outlier_hgt=outlier_hgt,
+        num_species=num_species)            
 
 
 
