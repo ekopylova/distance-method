@@ -12,17 +12,18 @@
         ii.   Go to step 3 if gene has more than threshold number of homologs
               (min-num-homologs), otherwise go to next gene in target genome;
         iii.  Compute multiple sequence alignment on homolog genes using CLUSTAL;
-        iv.   Compute pairwise distance matrix using PHYLIP's protdist function;
+        iv.   Compute pairwise distance matrix using PHYLIP's protdist function
+              and Z-score normalize the set of pairwise distances for each gene
+              family and species;
         v.    Add distance matrix for all pairwise distances into global distance
               matrix storing results for all genes
 
     2. Cluster gene families by species,
-        vi.   Cluster gene families according to Hamming distance;
-        vii.  For each gene family and species, z-score normalize the set of
-              pairwise distances between the gene in that species and all other
-              species;
-        viii. Cluster pairwise distances to each gene cluster;
-        ix.   Run outlier detection algorithm on each cluster (paragraph 2
+        vi.   Compute all species sets (sets of genes whose orthologs are detectable
+              in exactly the same subset of the considered species) using the
+              Hamming distance clustering algorithm;
+        vii.  Cluster genes to each core species set cluster;
+        viii. Run outlier detection algorithm on each cluster (paragraph 2
               of section 'Detecting Outlier Genes' in original paper)
 """
 
@@ -108,7 +109,7 @@ def preprocess_data(working_dir,
         sys.stdout.write("Target organism\tNumber of genes\n")
     # each file contains genes for species
     species = 0
-    for _file in glob.glob(join(target_proteomes_dir, "*.faa")):
+    for _file in glob.glob(join(target_proteomes_dir, "*.fa")):
         if verbose:
             sys.stdout.write("%s. %s\t" % (species+1, basename(_file)))
         with open(_file, 'rb') as readfile:
@@ -117,7 +118,7 @@ def preprocess_data(working_dir,
                 label = label.split()[0]
                 # Blast parses reference ids to remove the |cl| from <|cl|ref_id
                 # (update this for other parsing requirements)
-                label = label.split('|')[1]
+                #label = label.split('|')[1]
                 ref_db[label] = seq
                 sudo_label = "%s_%s" % (species, gene)
                 gene_map[label] = sudo_label
@@ -372,9 +373,15 @@ def cluster_distances(species_set_dict,
     # determine core clusters (initial species sets
     # with more than species_set_size genes)
     gene_clusters_dict = {}
-    for bitvector in sorted_species_set:
-      if bitvector[1] >= species_set_size:
-        gene_clusters_dict[bitvector[0]] = []
+    # if the largest species set contains less than
+    # threshold (species_set_size) elements, set the
+    # only core cluster to the largest species set
+    if sorted_species_set[0][1] < species_set_size:
+      gene_clusters_dict[sorted_species_set[0][0]] = []
+    else:
+      for bitvector in sorted_species_set:
+        if bitvector[1] >= species_set_size:
+          gene_clusters_dict[bitvector[0]] = []      
 
     # assign species sets with fewer than species_set_size
     # species to core clusters if the Hamming distance
@@ -440,11 +447,11 @@ def detect_outlier_genes(species_set,
 
     # if number of outlier distances exceeds threshold, label
     # gene as outlier
-    outlier_genes = []
+    outlier_genes = set()
     for i in range(total_genes):
       for j in range(num_species):
         if outlier_count_matrix[i][j] > num_species*outlier_hgt:
-          outlier_genes.append(i)
+          outlier_genes.add(i)
 
     return outlier_genes
 
@@ -525,7 +532,7 @@ def _main(query_proteome_fp,
     if verbose:
         sys.stdout.write("\nRunning BLASTp ..\n")
     hits = {}
-    for _file in glob.glob(join(target_proteomes_dir, "*.faa")):
+    for _file in glob.glob(join(target_proteomes_dir, "*.fa")):
         # launch BLASTp
         alignments_fp = launch_blast(query_proteome_fp=query_proteome_fp,
             ref_fp=_file,
