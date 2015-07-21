@@ -36,6 +36,7 @@ import threading
 import subprocess
 import traceback
 import shlex
+from os import listdir
 from os.path import join, splitext, basename
 from string import maketrans
 from itertools import imap, chain
@@ -109,10 +110,10 @@ def preprocess_data(working_dir,
         sys.stdout.write("Target organism\tNumber of genes\n")
     # each file contains genes for species
     species = 0
-    for _file in glob.glob(join(target_proteomes_dir, "*.fa")):
+    for _file in listdir(target_proteomes_dir):
         if verbose:
             sys.stdout.write("%s. %s\t" % (species+1, basename(_file)))
-        with open(_file, 'rb') as readfile:
+        with open(join(target_proteomes_dir,_file), 'rb') as readfile:
             gene = 0
             for label, seq in parse_fasta(readfile):
                 label = label.split()[0]
@@ -135,11 +136,14 @@ def launch_blast(query_proteome_fp,
                  working_dir,
                  e_value=10e-20,
                  threads=1):
-    """ Launch BLASTp given a query proteome and a reference database of proteomes
+    """ Launch BLASTp given a query proteome and a reference
+        database of proteomes
     """
+    db_file_fp = join(working_dir, "%s" % basename(ref_fp))
     # build blast database
     makeblastdb_command = ["makeblastdb",
                            "-in", ref_fp,
+                           "-out", db_file_fp,
                            "-dbtype", "prot",
                            "-parse_seqids"]
     proc = subprocess.Popen(makeblastdb_command,
@@ -154,7 +158,7 @@ def launch_blast(query_proteome_fp,
     # launch blast
     out_file_fp = join(working_dir, "%s.blast" % basename(splitext(query_proteome_fp)[0]))
     blastp_command = ["blastp",
-                      "-db", ref_fp,
+                      "-db", db_file_fp,
                       "-query", query_proteome_fp,
                       "-evalue", str(e_value),
                       "-num_threads", str(threads),
@@ -532,10 +536,11 @@ def _main(query_proteome_fp,
     if verbose:
         sys.stdout.write("\nRunning BLASTp ..\n")
     hits = {}
-    for _file in glob.glob(join(target_proteomes_dir, "*.fa")):
+
+    for _file in listdir(target_proteomes_dir):
         # launch BLASTp
         alignments_fp = launch_blast(query_proteome_fp=query_proteome_fp,
-            ref_fp=_file,
+            ref_fp=join(target_proteomes_dir,_file),
             working_dir=working_dir,
             e_value=e_value,
             threads=threads)
