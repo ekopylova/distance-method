@@ -20,9 +20,9 @@
 
     2. Cluster gene families by species,
         vi.   Compute all species sets (sets of genes whose orthologs are detectable
-              in exactly the same subset of the considered species) using the
-              Hamming distance clustering algorithm;
-        vii.  Cluster genes to each core species set cluster;
+              in exactly the same subset of the considered species);
+        vii.  Cluster genes to each core species set cluster using the Hamming
+              distance clustering algorithm;
         viii. Run outlier detection algorithm on each cluster (paragraph 2
               of section 'Detecting Outlier Genes' in original paper)
 """
