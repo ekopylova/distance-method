@@ -99,10 +99,30 @@ def hamming(str1, str2):
 def preprocess_data(working_dir,
                     target_proteomes_dir,
                     verbose=False):
-    """ Map each gene to sudo name (ex. S1_G1) for easier
-        output comparison and the 10 character name limitation
-        in PHYLIP output. This format is limited up to 999
-        species and 9999 genes per species.
+    """ Map each gene to sudo name (ex. 1_1 for species 1, gene 1)
+        for easier output comparison and the 10 character name limitation
+        in PHYLIP output. This format is limited up to 9999
+        species and 99999 genes per species.
+
+        Parameters
+        ----------
+        working_dir:  string
+          path to working directory
+        target_proteomes_dir: string
+          path to directory holding proteomes for all target organisms
+        verbose: boolean, optional
+          output details about the running processes of this function
+
+        Return
+        ------
+        gene_map: dictionary
+          "two-way" dictionary storing gene names as keys and their
+          pseudo names as values, and vica versa
+        ref_db: dictionary
+          dictionary storing FASTA label as key and sequence as
+          value for the reference databases
+        species: integer
+          the number of species in the reference databases
     """
     gene_map = {}
     ref_db = {}
@@ -117,7 +137,8 @@ def preprocess_data(working_dir,
             gene = 0
             for label, seq in parse_fasta(readfile):
                 label = label.split()[0]
-                # Blast parses reference ids to remove the |cl| from <|cl|ref_id
+                # Blast parses reference ids to remove the |cl| 
+                # from <|cl|ref_id
                 # (update this for other parsing requirements)
                 #label = label.split('|')[1]
                 ref_db[label] = seq
@@ -137,7 +158,26 @@ def launch_blast(query_proteome_fp,
                  e_value=10e-20,
                  threads=1):
     """ Launch BLASTp given a query proteome and a reference
-        database of proteomes
+        database of proteomes.
+
+        Parameters
+        ----------
+        query_proteome_fp: string
+          filepath to query proteome
+        ref_fp: string
+          filepath to reference proteome
+        working_dir: string
+          working directory path
+        e_value: float, optional
+          the cutoff E-value for BLASTP results
+        threads: integer
+          number of threads to use for running BLASTP
+
+        Return
+        ------
+        out_file_fp: string
+          filepath to tabular alignment file output by
+          BLASTP
     """
     db_file_fp = join(working_dir, "%s" % basename(ref_fp))
     # build blast database
@@ -156,7 +196,8 @@ def launch_blast(query_proteome_fp,
         print stderr
 
     # launch blast
-    out_file_fp = join(working_dir, "%s.blast" % basename(splitext(query_proteome_fp)[0]))
+    out_file_fp = join(
+      working_dir, "%s.blast" % basename(splitext(query_proteome_fp)[0]))
     blastp_command = ["blastp",
                       "-db", db_file_fp,
                       "-query", query_proteome_fp,
@@ -179,12 +220,23 @@ def launch_blast(query_proteome_fp,
 
 def parse_blast(alignments_fp,
                 hits,
-                gene_map,
-                evalue_cutoff):
+                gene_map):
     """ Parse BLASTp alignment file into a dictionary where
         the keys are the queries and the values are all the
         reference sequences to which the query mapped with
-        E-value cutoff score
+        E-value cutoff score.
+
+        Parameters
+        ----------
+        alignments_fp: string
+          filepath to tabular alignment file output by BLASTP
+        hits: dictionary
+          dictionary storing query (gene) names as keys and
+          the best aligning reference sequences as values (one
+          alignment per reference sequence)
+        gene_map: dictionary
+          "two-way" dictionary storing gene names as keys and their
+          pseudo names as values, and vica versa
     """
     # read blastp results
     with open(alignments_fp, 'U') as alignments_f:
@@ -192,7 +244,6 @@ def parse_blast(alignments_fp,
             line = line.split('\t')
             query = line[0]
             ref = line[1]
-            e_value = line[10]
             # do not store alignments where the query
             # gene matched itself in the database
             if query == ref:
@@ -210,7 +261,6 @@ def parse_blast(alignments_fp,
                         add_alignment = False
                         break
                 if add_alignment:
-                  if float(e_value) <= float(evalue_cutoff):
                     hits[query].append(ref)
 
 
@@ -220,10 +270,32 @@ def launch_msa(fasta_in_fp,
                ref_db,
                hits,
                query,
-               timeout,
-               verbose=False,
-               warnings=False):
+               timeout):
     """ Create multiple sequence alignments for all gene othologs
+        using Clustalw.
+
+        Parameters
+        ----------
+        fasta_in_fp: string
+          filepath to FASTA file of protein sequences to use
+          as input to Clustalw
+        clustal_command_fp: string
+          filepath to Clustalw command (interactive)
+        gene_map: dictionary
+          "two-way" dictionary storing gene names as keys and their
+          pseudo names as values, and vica versa
+        ref_db: dictionary
+          dictionary storing FASTA label as key and sequence as
+          value for the reference databases
+        hits: dictionary
+          dictionary storing query (gene) names as keys and
+          the best aligning reference sequences as values (one
+          alignment per reference sequence)
+        query: string
+          query gene name
+        timeout: integer
+          number of seconds to allow Clustalw to run before
+          terminating the process
     """
     with open(fasta_in_fp, 'w') as in_f:
         sorted(hits[query])
@@ -236,14 +308,23 @@ def launch_msa(fasta_in_fp,
         stdin=clustal_command_f,
         close_fds=True)
       if status < 0:
-        sys.stdout.write("status: %s\noutput: %s\terror: %s\t" % (status, output, error))
+        sys.stdout.write(
+          "status: %s\noutput: %s\terror: %s\t" % (status, output, error))
 
 
 def compute_distances(phylip_command_fp,
                       phylip_fp,
-                      verbose=False,
                       warnings=False):
     """ Compute distances between each pair of sequences in MSA
+        (multiple sequence alignment) using PHYLIP's protdist
+        function.
+
+        Parameters
+        ----------
+        phylip_command_fp: string
+          filepath to the PHYLIP command (interactive)
+        warnings: boolean, optional
+          print warnings output by PHYLIP
     """
     with open(phylip_command_fp, 'U') as phylip_command_f:
         proc = subprocess.Popen("protdist",
@@ -263,9 +344,72 @@ def normalize_distances(phylip_fp,
                         full_distance_matrix_offset,
                         species_set_dict,
                         gene_bitvector_map):
-    """ - Parse PHYLIP alignments and Z-score normalize each
-        alignment entry
-        - Compute bitvectors for all species sets
+    """ This function parses the output file of PHYLIP's
+        protdist function containing the distance matrix,
+        Z-score normalizes the set of pairwise distances
+        between the gene in a species and all other
+        species and stores the results in a separate array.
+
+        Each normalized distance matrix is then sorted by
+        species name and added to the complete array storing
+        distance matrices for all genes. In addition, a list
+        of missing species (species which did not include a
+        certain gene) is also maintained and used for
+        setting nan's in array cells which represent those
+        species.
+
+        Below is an example of a parsed distance matrix
+        for 3 genes and 3 species:
+            0         1         2        (genes)        
+        0_0 nan       nan       nan 
+        0_1 0.53099   0.878855  0.83673
+        0_2 0.642856  1.083039  1.083039
+        1_0 0.300297  0.300297  0.702003
+        1_1 nan       nan       nan
+        1_2 0.399722  0.379156  0.356543
+        2_0 0.53099   0.53099   0.83673
+        2_1 0.399722  0.399722  0.356543
+        2_2 nan       nan       nan
+
+        (species pairs)
+
+
+        Example of Z-score normalized distance matrix from
+        above:
+            0            1           2        (genes) 
+        0_0 nan          nan         nan       
+        0_1 -1.40548346  0.83861735  0.56686611
+        0_2 -1.41421356  0.70710678  0.70710678
+        1_0 -0.70710678 -0.70710678  1.41421356
+        1_1 nan          nan         nan
+        1_2 1.20493966   0.03869341 -1.24363308
+        2_0 -0.70710678 -0.70710678  1.41421356
+        2_1 0.70710678   0.70710678 -1.41421356
+        2_2 nan          nan         nan
+
+        (species pairs)       
+
+
+        Parameters
+        ----------
+        phylip_fp: string
+          filepath to distance matrix output by PHYLIP's
+          protdist function
+        full_distance_matrix: dictionary
+          complete distance matrix for pairwise
+          alignments between all species for every gene
+        num_species: integer
+          number of species in the reference database
+        full_distance_matrix_offset: integer
+          the index offset for elements in full_distance_matrix
+          where to write the next array
+        species_set_dict: dictionary
+          dictionary containing the binary indicator vectors as
+          keys and the number of genes with identical species
+          set represented by the binary vectors as values
+        gene_bitvector_map: list
+          list containing the binary indicator vector for
+          each query gene
     """
     # assume a pairwise alignment exists for all species
     missing_species = [str(x) for x in range(0,num_species)]
@@ -369,7 +513,47 @@ def cluster_distances(species_set_dict,
                       hamming_distance):
     """ Cluster gene families by species with detectable
         orthologs in exactly the same subset of the
-        considered species
+        considered species.
+
+        Ex. Assume we have 4 genes and 5 species with the
+        following distance matrix:
+
+            0             1             2             3
+        0_0 nan           nan           nan           nan
+        0_1 -1.59564844   -1.388031632  -0.9634704748 -1.342272936
+        0_2 -0.4259542606 nan           0.7035215923  1.223837777
+        0_3 -1.55041393   -1.51499567   -0.9634704748 -1.330178178
+        0_4 -0.3659762821 0.8346037464  0.6565725705  1.15274682
+        ..
+        ..
+
+        There are two binary indicator vectors to represent the
+        species present in the four genes: IIIII (gene 0, 2 and 3),
+        II0II (gene 1). If the core set threshold was 3, then
+        there would be 1 core species set represented by IIIII.
+
+        Parameters
+        ----------
+        species_set_dict: dictionary
+          dictionary containing the binary indicator vectors as
+          keys and the number of genes with identical species
+          set represented by the binary vectors as values
+        species_set_size: integer
+          threshold number of genes in a species set to
+          allow it to form a core cluster
+        hamming_distance: integer
+          maximum number of mismatches between two binary
+          indicator vectors (ex. IIII and I0II) for the
+          genes in a candidate vector to be merged into the
+          core cluster
+
+        Returns
+        -------
+        gene_clusters_dict: dictionary
+          dictionary containing core species sets as keys
+          and all belonging species sets as values
+          (determined by the Hamming distance clustering
+          algorithm)       
     """
     sorted_species_set = sorted(species_set_dict.items(),
       key=operator.itemgetter(1), reverse=True)
@@ -423,7 +607,29 @@ def detect_outlier_genes(species_set,
         outlier_hgt,
         num_species,
         total_genes):
-    """ Detect outlier genes
+    """ Detect outlier genes algorithm described in section
+        "Detecting `Outlier' Genes" of the Wei. X et al. paper.
+        The full distance matrix is represented in the format:
+
+        full_distance_matrix[#genes][#species][#species] =
+        [[[0_0, 0_1, 0_2, .., 0_n]
+          [1_0, 1_1, 1_2, .., 1_n]
+          ..
+          [n_0, n_1, n_2, .., n_n]]
+
+         [[0_0, 0_1, 0_2, .., 0_n]
+          [1_0, 1_1, 1_2, .., 1_n]
+          ..
+          [n_0, n_1, n_2, .., n_n]]
+
+          ..
+         [[0_0, 0_1, 0_2, .., 0_n]
+          [1_0, 1_1, 1_2, .., 1_n]
+          ..
+          [n_0, n_1, n_2, .., n_n]]]
+
+        The mean and standard deviation are computed for each species pair including all
+        genes.
     """
     outlier_flag_matrix = numpy.zeros(shape=(total_genes,num_species,num_species), dtype=bool)
     distance_vector = numpy.zeros(total_genes)
@@ -434,15 +640,23 @@ def detect_outlier_genes(species_set,
             distance_vector[k] = full_distance_matrix[k][i][j]
           mean = numpy.nanmean(distance_vector)
           stdev = numpy.nanstd(distance_vector)
+          mean2 = numpy.nanmean(full_distance_matrix, axis=1)
+          stdev2 = numpy.nanmean(full_distance_matrix, axis=1)
+
+          print "mean = %s\tmean2 = %s" % (mean, mean2)
+          print "stdev = %s\tstdev2 = %s" % (stdev, stdev2)
+
           low_bound = mean - stdev_offset*stdev
           up_bound = mean + stdev_offset*stdev
           for k, distance in enumerate(distance_vector):
-            if (distance != numpy.nan and ((distance < low_bound) or (distance > up_bound))):
+            if (distance != numpy.nan and
+               ((distance < low_bound) or (distance > up_bound))):
               outlier_flag_matrix[k][i][j] = 1
 
     # traverse outlier_matrix by gene and count the number of
     # outlier distances by species
-    outlier_count_matrix = numpy.zeros(shape=(total_genes,num_species), dtype=int)
+    outlier_count_matrix = numpy.zeros(
+      shape=(total_genes,num_species), dtype=int)
     for i in range(total_genes):
       for j in range(num_species):
         for k in range(num_species):
@@ -482,9 +696,10 @@ def output_full_matrix(matrix, num_species):
 @click.argument('working-dir', required=True,
                 type=click.Path(resolve_path=True, readable=True, exists=False,
                                 file_okay=True))
-@click.option('--min-num-homologs', type=int, required=False, default=3, show_default=True,
-              help=('The mininum number of homologs (determined by BLAST search) '
-                    'for each gene to test'))
+@click.option('--min-num-homologs', type=int, required=False, default=3,
+              show_default=True,
+              help=('The mininum number of homologs (determined by BLAST '
+                    'search) for each gene to test'))
 @click.option('--e-value', type=float, required=False, default=10e-20, show_default=True,
               help=("The E-value cutoff to identify orthologous genes using BLASTP"))
 @click.option('--threads', type=int, required=False, default=1, show_default=True,
@@ -548,8 +763,7 @@ def _main(query_proteome_fp,
         # generate a dictionary of orthologous genes
         parse_blast(alignments_fp=alignments_fp,
                     hits=hits,
-                    gene_map=gene_map,
-                    evalue_cutoff=e_value)
+                    gene_map=gene_map)
 
     # keep only genes with >= min_num_homologs
     hits_min_num_homologs = {}
@@ -565,7 +779,10 @@ def _main(query_proteome_fp,
     hits.clear()
 
     if verbose:
-        sys.stdout.write("Total number of orthologous gene families with at least %s genes: %s\n" % (min_num_homologs, len(hits_min_num_homologs)))
+        sys.stdout.write(
+          "Total number of orthologous gene families with at "
+          "least %s genes: %s\n" % (
+            min_num_homologs, len(hits_min_num_homologs)))
     # generate command for CLUSTALW
     phy_msa_fp = join(working_dir, "msa.phy")
     dnd_msa_fp = join(working_dir, "msa.dnd")
@@ -574,7 +791,9 @@ def _main(query_proteome_fp,
     fasta_in_fp = join(working_dir, "input.faa")
     clustal_command_fp = join(working_dir, "clustal_command.txt")
     with open(clustal_command_fp, 'w') as clustal_command_f:
-        clustal_command_f.write('1\n%s\n2\n9\n1\n4\n\n1\n%s\n%s\nX\n\nX\n' % (fasta_in_fp, phy_msa_fp, dnd_msa_fp))
+        clustal_command_f.write(
+          '1\n%s\n2\n9\n1\n4\n\n1\n%s\n%s\nX\n\nX\n' % (
+            fasta_in_fp, phy_msa_fp, dnd_msa_fp))
     phylip_command_fp = join(working_dir, "phylip_command.txt")
     with open(phylip_command_fp, 'w') as phylip_command_f:
         phylip_command_f.write('%s\nF\n%s\nR\nY\n' % (phy_msa_fp, phylip_fp))
@@ -583,9 +802,12 @@ def _main(query_proteome_fp,
     if verbose:
         sys.stdout.write("\nRunning CLUSTALW and PROTDIST ..\n")
     if max_homologs > num_species:
-        raise ValueError("max_homologs > num_species: %s > %s " % (max_homologs, num_species))
+        raise ValueError(
+          "max_homologs > num_species: %s > %s " % (
+            max_homologs, num_species))
     # distance matrix containing distances between all ortholog genes
-    full_distance_matrix = numpy.zeros(shape=(total_genes,num_species,num_species), dtype=float)
+    full_distance_matrix = numpy.zeros(
+      shape=(total_genes,num_species,num_species), dtype=float)
     # dictionary to store all subsets of orthologs (keys) and
     # their number of occurrences (values) (maximum occurrences
     # is equal to the number of genes)
@@ -604,14 +826,11 @@ def _main(query_proteome_fp,
           gene_map=gene_map,
           hits=hits_min_num_homologs,
           query=query,
-          timeout=timeout,
-          verbose=verbose,
-          warnings=warnings)
+          timeout=timeout)
 
       # compute distances between each pair of sequences in MSA
       compute_distances(phylip_command_fp=phylip_command_fp,
           phylip_fp=phylip_fp,
-          verbose=verbose,
           warnings=warnings)
 
       # Z-score normalize distance matrix and add results
@@ -633,7 +852,8 @@ def _main(query_proteome_fp,
     # detect outlier genes per core cluster of genes
     sys.stdout.write("Candidate HGT genes: \n")
     for core_cluster in gene_clusters_dict:
-      outlier_genes = detect_outlier_genes(species_set=gene_clusters_dict[core_cluster],
+      outlier_genes = detect_outlier_genes(
+        species_set=gene_clusters_dict[core_cluster],
         gene_bitvector_map=gene_bitvector_map,
         full_distance_matrix=full_distance_matrix,
         stdev_offset=stdev_offset,
@@ -645,9 +865,6 @@ def _main(query_proteome_fp,
         sys.stdout.write("%s\n" % gene_id[gene])          
 
     #output_full_matrix(outlier_genes, num_species)
-
-
-
 
 
 if __name__ == "__main__":
